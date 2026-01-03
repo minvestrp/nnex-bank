@@ -1,5 +1,5 @@
 // src/lib/nnexCore.ts
-// NNEX BANK — MVP Core (in-memory)
+// NNEX BANK — Netlify-safe MVP Core
 
 export type Currency = "USD" | "EUR" | "GBP" | "AED";
 
@@ -45,23 +45,21 @@ export type Transaction = {
 type Session = { token: string; userId: string; createdAt: string };
 
 const now = () => new Date().toISOString();
-
-/** SAFE ID — CRA / Netlify compatible */
 const uid = () =>
-  Date.now().toString(36) + Math.random().toString(36).slice(2);
+  "id_" + Math.random().toString(36).slice(2) + "_" + Date.now();
 
-const toMinor = (amount: number) => Math.round(amount * 100);
-const fromMinor = (minor: number) => Math.round(minor) / 100;
+const toMinor = (v: number) => Math.round(v * 100);
+const fromMinor = (v: number) => v / 100;
 
 class NNEXCore {
-  users = new Map<string, User>();
-  accounts = new Map<string, Account>();
-  sessions = new Map<string, Session>();
-  transactions = new Map<string, Transaction>();
+  users: User[] = [];
+  accounts: Account[] = [];
+  sessions: Session[] = [];
+  transactions: Transaction[] = [];
   entries: LedgerEntry[] = [];
 
   bootstrap() {
-    if (this.users.size > 0) return;
+    if (this.users.length) return;
 
     const user: User = {
       id: uid(),
@@ -70,7 +68,8 @@ class NNEXCore {
       kycStatus: "PENDING",
       createdAt: now(),
     };
-    this.users.set(user.id, user);
+
+    this.users.push(user);
 
     const accUSD: Account = {
       id: uid(),
@@ -79,6 +78,7 @@ class NNEXCore {
       currency: "USD",
       createdAt: now(),
     };
+
     const accEUR: Account = {
       id: uid(),
       userId: user.id,
@@ -87,111 +87,107 @@ class NNEXCore {
       createdAt: now(),
     };
 
-    this.accounts.set(accUSD.id, accUSD);
-    this.accounts.set(accEUR.id, accEUR);
+    this.accounts.push(accUSD, accEUR);
 
-    this.postTopup(user.id, accUSD.id, 5000, "Initial top-up", "NNEX Demo");
+    this.postTopup(user.id, accUSD.id, 5000, "Initial funding", "NNEX Demo");
   }
 
   login(email: string) {
-    const user = [...this.users.values()].find((u) => u.email === email);
+    const user = this.users.find((u) => u.email === email);
     if (!user) throw new Error("User not found");
+
     const token = uid();
-    this.sessions.set(token, { token, userId: user.id, createdAt: now() });
+    this.sessions.push({ token, userId: user.id, createdAt: now() });
     return { token, user };
   }
 
-  getUserByToken(token: string) {
-    const s = this.sessions.get(token);
+  me(token: string): User {
+    const s = this.sessions.find((x) => x.token === token);
     if (!s) throw new Error("Unauthorized");
-    const u = this.users.get(s.userId);
+
+    const u = this.users.find((x) => x.id === s.userId);
     if (!u) throw new Error("Unauthorized");
+
     return u;
   }
 
-  submitKyc(token: string, payload: { fullName: string }) {
-    const u = this.getUserByToken(token);
-    const updated: User = {
-      ...u,
-      name: payload.fullName || u.name,
-      kycStatus: "PENDING",
-    };
-    this.users.set(u.id, updated);
-    return updated;
+  submitKyc(token: string, fullName: string) {
+    const u = this.me(token);
+    u.name = fullName || u.name;
+    u.kycStatus = "PENDING";
+    return u;
   }
 
   approveKycForDemo(token: string) {
-    const u = this.getUserByToken(token);
-    const updated = { ...u, kycStatus: "APPROVED" };
-    this.users.set(u.id, updated);
-    return updated;
+    const u = this.me(token);
+    u.kycStatus = "APPROVED";
+    return u;
   }
 
-  listAccounts(token: string) {
-    const u = this.getUserByToken(token);
-    return [...this.accounts.values()].filter((a) => a.userId === u.id);
+  accountsByUser(token: string) {
+    const u = this.me(token);
+    return this.accounts.filter((a) => a.userId === u.id);
   }
 
-  getBalanceMinor(accountId: string) {
+  balanceMinor(accountId: string) {
     return this.entries
       .filter((e) => e.accountId === accountId)
       .reduce((s, e) => s + e.amountMinor, 0);
   }
 
-  listTransactions(token: string) {
-    const u = this.getUserByToken(token);
-    const ids = new Set(
-      [...this.accounts.values()]
-        .filter((a) => a.userId === u.id)
-        .map((a) => a.id)
+  transactionsForUser(token: string) {
+    const u = this.me(token);
+    const ids = this.accounts
+      .filter((a) => a.userId === u.id)
+      .map((a) => a.id);
+
+    return this.transactions.filter(
+      (t) =>
+        (t.fromAccountId && ids.includes(t.fromAccountId)) ||
+        (t.toAccountId && ids.includes(t.toAccountId))
     );
-
-    return [...this.transactions.values()]
-      .filter(
-        (t) =>
-          (t.fromAccountId && ids.has(t.fromAccountId)) ||
-          (t.toAccountId && ids.has(t.toAccountId))
-      )
-      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-  }
-
-  private postEntry(e: Omit<LedgerEntry, "id" | "createdAt">) {
-    const entry: LedgerEntry = { ...e, id: uid(), createdAt: now() };
-    this.entries.push(entry);
   }
 
   private postTx(t: Omit<Transaction, "id" | "createdAt" | "status">) {
     const tx: Transaction = {
       ...t,
       id: uid(),
-      createdAt: now(),
       status: "POSTED",
+      createdAt: now(),
     };
-    this.transactions.set(tx.id, tx);
+    this.transactions.unshift(tx);
     return tx;
+  }
+
+  private postEntry(e: Omit<LedgerEntry, "id" | "createdAt">) {
+    this.entries.push({ ...e, id: uid(), createdAt: now() });
   }
 
   postTopup(
     userId: string,
-    toAccountId: string,
+    accountId: string,
     amount: number,
     memo?: string,
     counterparty?: string
   ) {
-    const amountMinor = toMinor(amount);
+    const acc = this.accounts.find((a) => a.id === accountId);
+    if (!acc || acc.userId !== userId) throw new Error("Forbidden");
+
+    const minor = toMinor(amount);
+
     const tx = this.postTx({
       type: "TOPUP",
-      currency: "USD",
-      amountMinor,
-      toAccountId,
+      currency: acc.currency,
+      amountMinor: minor,
+      toAccountId: acc.id,
       memo,
       counterparty,
     });
 
     this.postEntry({
       txId: tx.id,
-      accountId: toAccountId,
-      amountMinor,
+      accountId: acc.id,
+      amountMinor: minor,
       memo,
       counterparty,
     });
@@ -206,12 +202,14 @@ class NNEXCore {
     amount: number,
     memo?: string
   ) {
-    const u = this.getUserByToken(token);
-    const acc = this.accounts.get(fromAccountId);
-    if (!acc || acc.userId !== u.id) throw new Error("Forbidden");
+    const u = this.me(token);
+    const acc = this.accounts.find(
+      (a) => a.id === fromAccountId && a.userId === u.id
+    );
+    if (!acc) throw new Error("Forbidden");
 
     const minor = toMinor(amount);
-    if (this.getBalanceMinor(acc.id) < minor)
+    if (this.balanceMinor(acc.id) < minor)
       throw new Error("Insufficient funds");
 
     const tx = this.postTx({
@@ -247,13 +245,18 @@ core.bootstrap();
 
 export const nnexApi = {
   login: (email: string) => core.login(email),
-  me: (token: string) => core.getUserByToken(token),
-  submitKyc: (t: string, n: string) => core.submitKyc(t, { fullName: n }),
+  me: (token: string) => core.me(token),
+  submitKyc: (t: string, n: string) => core.submitKyc(t, n),
   approveKycForDemo: (t: string) => core.approveKycForDemo(t),
-  accounts: (t: string) => core.listAccounts(t),
-  balanceMinor: (id: string) => core.getBalanceMinor(id),
-  transactions: (t: string) => core.listTransactions(t),
-  transfer: (t: string, f: string, to: string, a: number, m?: string) =>
-    core.transfer(t, f, to, a, m),
+  accounts: (t: string) => core.accountsByUser(t),
+  balanceMinor: (id: string) => core.balanceMinor(id),
+  transactions: (t: string) => core.transactionsForUser(t),
+  transfer: (
+    t: string,
+    accId: string,
+    to: string,
+    amount: number,
+    memo?: string
+  ) => core.transfer(t, accId, to, amount, memo),
   formatMoney: (m: number, c: Currency) => core.formatMoney(m, c),
 };
