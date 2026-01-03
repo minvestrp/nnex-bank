@@ -1,122 +1,55 @@
 import React, { useEffect, useState } from "react";
-
-type Screen =
-  | "welcome"
-  | "register"
-  | "kyc"
-  | "dashboard"
-  | "transfer"
-  | "beneficiaries";
-
-type Currency = "USD" | "EUR" | "AED";
-
-type Account = {
-  id: string;
-  name: string;
-  currency: Currency;
-  balance: number;
-};
-
-type Beneficiary = {
-  id: string;
-  name: string;
-  iban: string;
-  currency: Currency;
-  template?: number;
-};
-
-type Tx = {
-  id: string;
-  to: string;
-  amount: number;
-  currency: Currency;
-  date: string;
-};
-
-/** SAFE ID */
-const genId = () =>
-  Date.now().toString(36) + Math.random().toString(36).slice(2);
-
-const storeKey = "nnex_bank_full_demo";
-
-const money = (v: number, c: Currency) =>
-  `${c === "USD" ? "$" : c === "EUR" ? "€" : "د.إ"}${v.toLocaleString()}`;
+import { nnexApi } from "./lib/nnexCore";
 
 export default function App() {
-  const saved = localStorage.getItem(storeKey);
-  const initial = saved
-    ? JSON.parse(saved)
-    : {
-        screen: "welcome" as Screen,
-        email: "",
-        accounts: [
-          { id: "usd", name: "Main Account", currency: "USD", balance: 125418 },
-          { id: "eur", name: "EU Account", currency: "EUR", balance: 64210 },
-        ],
-        beneficiaries: [
-          {
-            id: "b1",
-            name: "White Crypto Swap",
-            iban: "WCS-88921",
-            currency: "USD",
-            template: 25000,
-          },
-        ],
-        txs: [] as Tx[],
-        activeAccount: "usd",
-        selectedBeneficiary: "",
-        amount: "",
-      };
+  const [token, setToken] = useState<string | null>(null);
+  const [email, setEmail] = useState("founder@nnex.bank");
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [txs, setTxs] = useState<any[]>([]);
 
-  const [state, setState] = useState<any>(initial);
+  const login = async () => {
+    const res = nnexApi.login(email);
+    setToken(res.token);
+  };
 
   useEffect(() => {
-    localStorage.setItem(storeKey, JSON.stringify(state));
-  }, [state]);
+    if (!token) return;
+    setAccounts(nnexApi.accounts(token));
+    setTxs(nnexApi.transactions(token));
+  }, [token]);
 
-  const acc = state.accounts.find((a: Account) => a.id === state.activeAccount);
-
-  const send = () => {
-    const b = state.beneficiaries.find(
-      (x: Beneficiary) => x.id === state.selectedBeneficiary
+  if (!token)
+    return (
+      <div style={box}>
+        <h1>NNEX BANK</h1>
+        <input value={email} onChange={(e) => setEmail(e.target.value)} />
+        <button onClick={login}>Login</button>
+      </div>
     );
-    const value = Number(state.amount);
-    if (!b || !value || !acc || value > acc.balance) return;
-
-    setState((s: any) => ({
-      ...s,
-      accounts: s.accounts.map((a: Account) =>
-        a.id === acc.id ? { ...a, balance: a.balance - value } : a
-      ),
-      txs: [
-        {
-          id: genId(),
-          to: b.name,
-          amount: value,
-          currency: acc.currency,
-          date: new Date().toLocaleString(),
-        },
-        ...s.txs,
-      ],
-      amount: "",
-      screen: "dashboard",
-    }));
-  };
-
-  const reset = () => {
-    localStorage.removeItem(storeKey);
-    window.location.reload();
-  };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#000", color: "#fff" }}>
-      <div style={{ width: 420, margin: "auto", padding: 28 }}>
-        <h1>NNEX BANK</h1>
-        <p>{money(acc?.balance || 0, acc?.currency || "USD")}</p>
+    <div style={box}>
+      <h2>Accounts</h2>
+      {accounts.map((a) => (
+        <div key={a.id}>
+          {a.name} — {a.currency}
+        </div>
+      ))}
 
-        <button onClick={send}>Send</button>
-        <button onClick={reset}>Reset</button>
-      </div>
+      <h2>Transactions</h2>
+      {txs.map((t) => (
+        <div key={t.id}>
+          {t.type} {t.amountMinor / 100} {t.currency}
+        </div>
+      ))}
     </div>
   );
 }
+
+const box: React.CSSProperties = {
+  background: "#000",
+  color: "#fff",
+  minHeight: "100vh",
+  padding: 32,
+  fontFamily: "Inter, system-ui",
+};
