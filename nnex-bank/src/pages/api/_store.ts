@@ -1,273 +1,370 @@
-// src/pages/api/_store.ts
-// In-memory store for CodeSandbox dev runtime.
-// Later we will swap this with SQLite/Postgres without changing API contracts.
+// src/store.ts
+// Simple localStorage-backed store for NNEX BANK demo.
+// No crypto.randomUUID() (Netlify/TS compatibility).
 
-export type Currency = "USD" | "EUR" | "GBP" | "AED";
+export type Currency = "USD" | "USDT";
 
-export type User = {
+export type TxStatus = "pending" | "success" | "failed";
+export type TxType = "transfer" | "deposit" | "withdraw";
+
+export type KycStatus = "none" | "pending" | "approved";
+
+export interface User {
   id: string;
   email: string;
-  name: string;
-  kycStatus: "NOT_STARTED" | "PENDING" | "APPROVED";
-  createdAt: string;
-};
+  phone?: string;
+  kyc: KycStatus;
+  createdAt: number;
+}
 
-export type Account = {
+export interface Account {
   id: string;
-  userId: string;
-  name: string;
+  title: string;
   currency: Currency;
-  createdAt: string;
-};
+  balance: number;
+}
 
-export type Transaction = {
+export interface Tx {
   id: string;
-  type: "TOPUP" | "TRANSFER";
-  status: "POSTED";
-  createdAt: string;
+  ts: number;
+  type: TxType;
+  status: TxStatus;
+  to?: string; // beneficiary name / address label
+  amount: number;
   currency: Currency;
-  amountMinor: number;
-  fromAccountId?: string;
-  toAccountId?: string;
-  memo?: string;
-  counterparty?: string;
-};
+  note?: string;
+}
 
-export type LedgerEntry = {
+export interface Beneficiary {
   id: string;
-  txId: string;
-  accountId: string;
-  amountMinor: number;
-  createdAt: string;
-  memo?: string;
-  counterparty?: string;
-};
+  name: string;
+  kind: "bank" | "crypto";
+  // bank fields
+  bankName?: string;
+  iban?: string;
+  // crypto fields
+  chain?: string; // TRON / ETH / etc
+  address?: string;
+  asset?: "USDT";
+  createdAt: number;
+}
 
-type Session = { token: string; userId: string; createdAt: string };
+export interface Template {
+  id: string;
+  title: string;
+  beneficiaryId: string;
+  amount: number;
+  currency: Currency;
+  note?: string;
+  createdAt: number;
+}
 
-const now = () => new Date().toISOString();
-const uid = () =>
-  typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `id_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+export interface BankState {
+  user: User | null;
+  accounts: Account[];
+  txs: Tx[];
+  beneficiaries: Beneficiary[];
+  templates: Template[];
+}
 
-const toMinor = (amount: number) => Math.round(amount * 100);
+const LS_KEY = "nnex_bank_state_v1";
 
-class Store {
-  users = new Map<string, User>();
-  accounts = new Map<string, Account>();
-  sessions = new Map<string, Session>();
-  transactions = new Map<string, Transaction>();
-  entries: LedgerEntry[] = [];
+/**
+ * Safe ID generator for browsers + Netlify builds.
+ * (No crypto.randomUUID)
+ */
+export function createId(prefix = "id"): string {
+  return (
+    prefix +
+    "_" +
+    Date.now().toString(36) +
+    "_" +
+    Math.random().toString(36).slice(2, 10)
+  );
+}
 
-  bootstrap() {
-    if (this.users.size > 0) return;
+function now(): number {
+  return Date.now();
+}
 
-    const user: User = {
-      id: uid(),
-      email: "founder@nnex.bank",
-      name: "NNEX Founder",
-      kycStatus: "PENDING",
-      createdAt: now(),
-    };
-    this.users.set(user.id, user);
-
-    const accUSD: Account = {
-      id: uid(),
-      userId: user.id,
-      name: "Main",
-      currency: "USD",
-      createdAt: now(),
-    };
-    const accEUR: Account = {
-      id: uid(),
-      userId: user.id,
-      name: "Vault",
-      currency: "EUR",
-      createdAt: now(),
-    };
-    this.accounts.set(accUSD.id, accUSD);
-    this.accounts.set(accEUR.id, accEUR);
-
-    this.postTopup(
-      user.id,
-      accUSD.id,
-      5000,
-      "Initial top-up",
-      "NNEX Demo Funding"
-    );
-  }
-
-  getUserByToken(token: string): User {
-    const s = this.sessions.get(token);
-    if (!s) throw new Error("Unauthorized");
-    const u = this.users.get(s.userId);
-    if (!u) throw new Error("Unauthorized");
-    return u;
-  }
-
-  login(email: string) {
-    this.bootstrap();
-    const user = [...this.users.values()].find((u) => u.email === email);
-    if (!user)
-      throw new Error("User not found. Use founder@nnex.bank for demo.");
-    const token = uid();
-    this.sessions.set(token, { token, userId: user.id, createdAt: now() });
-    return { token, user };
-  }
-
-  listAccounts(userId: string) {
-    return [...this.accounts.values()].filter((a) => a.userId === userId);
-  }
-
-  getBalanceMinor(accountId: string) {
-    let sum = 0;
-    for (const e of this.entries)
-      if (e.accountId === accountId) sum += e.amountMinor;
-    return sum;
-  }
-
-  listTransactions(userId: string, limit = 50) {
-    const userAccountIds = new Set(this.listAccounts(userId).map((a) => a.id));
-    const txs = [...this.transactions.values()].filter((t) => {
-      if (t.fromAccountId && userAccountIds.has(t.fromAccountId)) return true;
-      if (t.toAccountId && userAccountIds.has(t.toAccountId)) return true;
-      return false;
-    });
-    txs.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-    return txs.slice(0, limit);
-  }
-
-  submitKyc(userId: string, fullName: string) {
-    const u = this.users.get(userId);
-    if (!u) throw new Error("User not found");
-    const updated: User = {
-      ...u,
-      name: fullName || u.name,
-      kycStatus: "PENDING",
-    };
-    this.users.set(userId, updated);
-    return updated;
-  }
-
-  approveKyc(userId: string) {
-    const u = this.users.get(userId);
-    if (!u) throw new Error("User not found");
-    const updated: User = { ...u, kycStatus: "APPROVED" };
-    this.users.set(userId, updated);
-    return updated;
-  }
-
-  private postEntry(e: Omit<LedgerEntry, "id" | "createdAt">) {
-    const entry: LedgerEntry = { ...e, id: uid(), createdAt: now() };
-    this.entries.push(entry);
-    return entry;
-  }
-
-  private postTx(t: Omit<Transaction, "id" | "createdAt" | "status">) {
-    const tx: Transaction = {
-      ...t,
-      id: uid(),
-      createdAt: now(),
-      status: "POSTED",
-    };
-    this.transactions.set(tx.id, tx);
-    return tx;
-  }
-
-  postTopup(
-    userId: string,
-    toAccountId: string,
-    amount: number,
-    memo?: string,
-    counterparty?: string
-  ) {
-    const acc = this.accounts.get(toAccountId);
-    if (!acc) throw new Error("Account not found");
-    if (acc.userId !== userId) throw new Error("Forbidden");
-
-    const amountMinor = toMinor(amount);
-    const tx = this.postTx({
-      type: "TOPUP",
-      currency: acc.currency,
-      amountMinor,
-      toAccountId,
-      memo,
-      counterparty,
-    });
-
-    this.postEntry({
-      txId: tx.id,
-      accountId: toAccountId,
-      amountMinor: +amountMinor,
-      memo,
-      counterparty,
-    });
-    return tx;
-  }
-
-  private getOrCreateClearingAccount(currency: Currency) {
-    const existing = [...this.accounts.values()].find(
-      (a) => a.userId === "SYSTEM" && a.currency === currency
-    );
-    if (existing) return existing.id;
-
-    const sys: Account = {
-      id: uid(),
-      userId: "SYSTEM",
-      name: "Clearing",
-      currency,
-      createdAt: now(),
-    };
-    this.accounts.set(sys.id, sys);
-    return sys.id;
-  }
-
-  transfer(
-    userId: string,
-    fromAccountId: string,
-    to: string,
-    amount: number,
-    memo?: string
-  ) {
-    const fromAcc = this.accounts.get(fromAccountId);
-    if (!fromAcc) throw new Error("From account not found");
-    if (fromAcc.userId !== userId) throw new Error("Forbidden");
-
-    const amountMinor = toMinor(amount);
-    if (amountMinor <= 0) throw new Error("Amount must be > 0");
-
-    const bal = this.getBalanceMinor(fromAcc.id);
-    if (bal < amountMinor) throw new Error("Insufficient funds");
-
-    const tx = this.postTx({
-      type: "TRANSFER",
-      currency: fromAcc.currency,
-      amountMinor,
-      fromAccountId: fromAcc.id,
-      memo,
-      counterparty: to,
-    });
-
-    this.postEntry({
-      txId: tx.id,
-      accountId: fromAcc.id,
-      amountMinor: -amountMinor,
-      memo,
-      counterparty: to,
-    });
-
-    const clearingId = this.getOrCreateClearingAccount(fromAcc.currency);
-    this.postEntry({
-      txId: tx.id,
-      accountId: clearingId,
-      amountMinor: +amountMinor,
-      memo,
-      counterparty: `From ${userId}`,
-    });
-
-    return tx;
+function readLS(): BankState | null {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as BankState;
+  } catch {
+    return null;
   }
 }
 
-export const store = new Store();
+function writeLS(state: BankState) {
+  localStorage.setItem(LS_KEY, JSON.stringify(state));
+}
+
+export function seedIfEmpty(): BankState {
+  const existing = readLS();
+  if (existing) return existing;
+
+  const demoUser: User = {
+    id: createId("user"),
+    email: "founder@nnex.bank",
+    phone: "+12015550123",
+    kyc: "approved",
+    createdAt: now(),
+  };
+
+  const accounts: Account[] = [
+    {
+      id: createId("acc"),
+      title: "Main account",
+      currency: "USD",
+      balance: 125430,
+    },
+    {
+      id: createId("acc"),
+      title: "USDT wallet",
+      currency: "USDT",
+      balance: 5021.55,
+    },
+  ];
+
+  const beneficiaries: Beneficiary[] = [
+    {
+      id: createId("ben"),
+      name: "White Crypto Swap",
+      kind: "crypto",
+      chain: "TRON",
+      address: "TQ9m...demo...9a",
+      asset: "USDT",
+      createdAt: now(),
+    },
+    {
+      id: createId("ben"),
+      name: "Acme Consulting LLC",
+      kind: "bank",
+      bankName: "Demo Bank",
+      iban: "DE00 0000 0000 0000 0000 00",
+      createdAt: now(),
+    },
+  ];
+
+  const templates: Template[] = [
+    {
+      id: createId("tpl"),
+      title: "Monthly Ops (USDT)",
+      beneficiaryId: beneficiaries[0].id,
+      amount: 250,
+      currency: "USDT",
+      note: "Ops",
+      createdAt: now(),
+    },
+    {
+      id: createId("tpl"),
+      title: "Consulting (USD)",
+      beneficiaryId: beneficiaries[1].id,
+      amount: 1200,
+      currency: "USD",
+      note: "Invoice",
+      createdAt: now(),
+    },
+  ];
+
+  const txs: Tx[] = [];
+
+  const state: BankState = {
+    user: demoUser,
+    accounts,
+    txs,
+    beneficiaries,
+    templates,
+  };
+
+  writeLS(state);
+  return state;
+}
+
+export function getState(): BankState {
+  return readLS() ?? seedIfEmpty();
+}
+
+export function setState(next: BankState) {
+  writeLS(next);
+}
+
+export function resetState() {
+  localStorage.removeItem(LS_KEY);
+}
+
+/* -------------------- USER -------------------- */
+
+export function getUser(): User | null {
+  return getState().user;
+}
+
+export function setUser(user: User | null) {
+  const s = getState();
+  const next: BankState = { ...s, user };
+  setState(next);
+}
+
+/**
+ * Demo login: if email matches, allow; otherwise create new user.
+ */
+export function loginByEmail(email: string): User {
+  const s = getState();
+  if (s.user && s.user.email.toLowerCase() === email.toLowerCase()) return s.user;
+
+  const user: User = {
+    id: createId("user"),
+    email,
+    kyc: "approved",
+    createdAt: now(),
+  };
+
+  setState({ ...s, user });
+  return user;
+}
+
+export function logout() {
+  const s = getState();
+  setState({ ...s, user: null });
+}
+
+/* -------------------- ACCOUNTS -------------------- */
+
+export function listAccounts(): Account[] {
+  return getState().accounts;
+}
+
+export function updateAccountBalance(accountId: string, newBalance: number) {
+  const s = getState();
+  const accounts = s.accounts.map((a) =>
+    a.id === accountId ? { ...a, balance: newBalance } : a
+  );
+  setState({ ...s, accounts });
+}
+
+export function findAccountByCurrency(currency: Currency): Account | undefined {
+  return getState().accounts.find((a) => a.currency === currency);
+}
+
+/* -------------------- TXS -------------------- */
+
+export function listTxs(): Tx[] {
+  // newest first
+  return [...getState().txs].sort((a, b) => b.ts - a.ts);
+}
+
+export function pushTx(tx: Tx) {
+  const s = getState();
+  setState({ ...s, txs: [tx, ...s.txs] });
+}
+
+/* -------------------- BENEFICIARIES -------------------- */
+
+export function listBeneficiaries(): Beneficiary[] {
+  return [...getState().beneficiaries].sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export function addBeneficiary(input: Omit<Beneficiary, "id" | "createdAt">): Beneficiary {
+  const s = getState();
+  const ben: Beneficiary = {
+    ...input,
+    id: createId("ben"),
+    createdAt: now(),
+  };
+  setState({ ...s, beneficiaries: [ben, ...s.beneficiaries] });
+  return ben;
+}
+
+export function removeBeneficiary(id: string) {
+  const s = getState();
+  const beneficiaries = s.beneficiaries.filter((b) => b.id !== id);
+  const templates = s.templates.filter((t) => t.beneficiaryId !== id);
+  setState({ ...s, beneficiaries, templates });
+}
+
+/* -------------------- TEMPLATES -------------------- */
+
+export function listTemplates(): Template[] {
+  return [...getState().templates].sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export function addTemplate(input: Omit<Template, "id" | "createdAt">): Template {
+  const s = getState();
+  const tpl: Template = {
+    ...input,
+    id: createId("tpl"),
+    createdAt: now(),
+  };
+  setState({ ...s, templates: [tpl, ...s.templates] });
+  return tpl;
+}
+
+export function removeTemplate(id: string) {
+  const s = getState();
+  setState({ ...s, templates: s.templates.filter((t) => t.id !== id) });
+}
+
+/* -------------------- TRANSFERS -------------------- */
+
+/**
+ * Executes a demo transfer:
+ * - decreases balance in matching currency account
+ * - creates Tx record
+ */
+export function sendTransfer(params: {
+  beneficiaryId: string;
+  amount: number;
+  currency: Currency;
+  note?: string;
+}): { ok: true; tx: Tx } | { ok: false; error: string } {
+  const { beneficiaryId, amount, currency, note } = params;
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { ok: false, error: "Invalid amount" };
+  }
+
+  const s = getState();
+  const acc = s.accounts.find((a) => a.currency === currency);
+  if (!acc) return { ok: false, error: "Account not found" };
+
+  if (acc.balance < amount) return { ok: false, error: "Insufficient funds" };
+
+  const ben = s.beneficiaries.find((b) => b.id === beneficiaryId);
+  if (!ben) return { ok: false, error: "Beneficiary not found" };
+
+  // apply balance update
+  const accounts = s.accounts.map((a) =>
+    a.id === acc.id ? { ...a, balance: +(a.balance - amount).toFixed(2) } : a
+  );
+
+  const tx: Tx = {
+    id: createId("tx"),
+    ts: now(),
+    type: "transfer",
+    status: "success",
+    to: ben.name,
+    amount: +amount.toFixed(2),
+    currency,
+    note,
+  };
+
+  setState({ ...s, accounts, txs: [tx, ...s.txs] });
+  return { ok: true, tx };
+}
+
+/**
+ * Runs a template (transfer preset)
+ */
+export function runTemplate(templateId: string): { ok: true; tx: Tx } | { ok: false; error: string } {
+  const tpl = getState().templates.find((t) => t.id === templateId);
+  if (!tpl) return { ok: false, error: "Template not found" };
+
+  return sendTransfer({
+    beneficiaryId: tpl.beneficiaryId,
+    amount: tpl.amount,
+    currency: tpl.currency,
+    note: tpl.note,
+  });
+}
